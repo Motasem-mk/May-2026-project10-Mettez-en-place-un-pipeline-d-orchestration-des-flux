@@ -1,0 +1,9 @@
+BottleNeck Kestra Workflow Failure Report
+========================================
+Flow ID: p10_no_expose
+Namespace: com.bottleneck
+Execution ID: 2FaF4q9G12MrFPvrSxj2Jx
+Execution start date: 2026-05-03T20:33:50.535611Z
+
+A task failed during the workflow execution.
+Please check the Kestra UI logs to identify the failed task.

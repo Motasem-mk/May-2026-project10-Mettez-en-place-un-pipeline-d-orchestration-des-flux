@@ -1,0 +1,269 @@
+id: p10_kestra_dataflow_orchestration_pipeline
+namespace: com.bottleneck
+
+description: >
+  Automated ETL orchestration pipeline for BottleNeck monthly revenue reporting and premium wine detection using Kestra, Python, and DuckDB.
+
+triggers:
+  - id: monthly_schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 9 15 * *"
+    timezone: Europe/Paris
+
+tasks:
+  # 1- Load ERP, Web & Liaison source files
+  - id: load_raw_files
+    type: io.kestra.plugin.scripts.shell.Commands
+
+    description: >
+      Load the three raw Excel source files from the mounted local data folder.
+
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+
+    outputFiles:
+      - erp.xlsx
+      - web.xlsx
+      - liaison.xlsx
+
+    commands:
+      - sh /app/scripts/load_raw_files.sh
+
+  # 2- Convert Excel files to CSV
+  - id: convert_excel_to_csv
+    type: io.kestra.plugin.scripts.python.Commands
+
+    description: >
+      Convert the three Excel source files into CSV files.
+
+    containerImage: bottleneck-python:latest
+
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+
+    inputFiles:
+      erp.xlsx: "{{ outputs.load_raw_files.outputFiles['erp.xlsx'] }}"
+      web.xlsx: "{{ outputs.load_raw_files.outputFiles['web.xlsx'] }}"
+      liaison.xlsx: "{{ outputs.load_raw_files.outputFiles['liaison.xlsx'] }}"
+
+    outputFiles:
+      - erp.csv
+      - web.csv
+      - liaison.csv
+
+    commands:
+      - python /app/scripts/convert_excel_to_csv.py
+
+    retry:
+      type: constant
+      maxAttempts: 3
+      interval: PT30S
+      warningOnRetry: true
+
+  # 3- Clean & deduplicate sources
+  - id: clean_dedup_sources
+    type: io.kestra.plugin.jdbc.duckdb.Queries
+
+    description: >
+      Clean and deduplicate the three source datasets: ERP, Web, and Liaison.
+
+    inputFiles:
+      erp.csv: "{{ outputs.convert_excel_to_csv.outputFiles['erp.csv'] }}"
+      web.csv: "{{ outputs.convert_excel_to_csv.outputFiles['web.csv'] }}"
+      liaison.csv: "{{ outputs.convert_excel_to_csv.outputFiles['liaison.csv'] }}"
+
+    url: "jdbc:duckdb:/tmp/bottleneck.db"
+
+    sql: "{{ read('file:///app/sql/01_clean_dedup_sources.sql') }}"
+
+    retry:
+      type: constant
+      maxAttempts: 3
+      interval: PT30S
+      warningOnRetry: true
+
+  # 4- Test cleaned sources
+  - id: test_cleaned_sources
+    type: io.kestra.plugin.jdbc.duckdb.Queries
+
+    description: >
+      Test the cleaned ERP, Web, and Liaison datasets by checking their expected row counts,
+      missing keys, and duplicate keys.
+
+    url: "jdbc:duckdb:/tmp/bottleneck.db"
+
+    fetchType: FETCH
+
+    sql: "{{ read('file:///app/sql/02_test_cleaned_sources.sql') }}"
+
+  # 5- Merge tables
+  - id: merge_sources
+    type: io.kestra.plugin.jdbc.duckdb.Queries
+
+    description: >
+      Merge cleaned ERP, Liaison, and Web data into one unified dataset.
+
+    url: "jdbc:duckdb:/tmp/bottleneck.db"
+
+    sql: "{{ read('file:///app/sql/03_merge_sources.sql') }}"
+
+    retry:
+      type: constant
+      maxAttempts: 3
+      interval: PT30S
+      warningOnRetry: true
+
+  # 6- Test merged dataset
+  - id: test_merge
+    type: io.kestra.plugin.jdbc.duckdb.Queries
+
+    description: >
+      Test merged dataset by checking the expected row count.
+
+    url: "jdbc:duckdb:/tmp/bottleneck.db"
+
+    fetchType: FETCH
+
+    sql: "{{ read('file:///app/sql/04_test_merge.sql') }}"
+
+  # 7- Compute revenue
+  - id: compute_revenue
+    type: io.kestra.plugin.jdbc.duckdb.Queries
+
+    description: >
+      Compute revenue for each product and create the revenue-per-product report.
+
+    url: "jdbc:duckdb:/tmp/bottleneck.db"
+
+    sql: "{{ read('file:///app/sql/05_compute_revenue.sql') }}"
+
+    retry:
+      type: constant
+      maxAttempts: 3
+      interval: PT30S
+      warningOnRetry: true
+
+  # 8- Test computed revenue
+  - id: test_revenue
+    type: io.kestra.plugin.jdbc.duckdb.Queries
+
+    description: >
+      Test the revenue outputs by checking row count, absence of missing revenue values,
+      and total revenue consistency.
+
+    url: "jdbc:duckdb:/tmp/bottleneck.db"
+
+    fetchType: FETCH
+
+    sql: "{{ read('file:///app/sql/06_test_revenue.sql') }}"
+
+  # 9- Z-score flagging
+  - id: zscore_flagging
+    type: io.kestra.plugin.scripts.python.Commands
+
+    description: >
+      Detect premium wines using the z-score method on wine prices.
+
+    containerImage: bottleneck-python:latest
+
+    pythonVersion: "3.11"
+
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      volumes:
+        - /Users/elkihale.n-abualqumboz.mk/Desktop/bottleneck_kestra_project/data:/app/data
+        - /Users/elkihale.n-abualqumboz.mk/Desktop/bottleneck_kestra_project/scripts:/app/scripts
+
+    commands:
+      - python /app/scripts/zscore_flagging.py
+
+  # 10- Extract premium wines
+  - id: extract_premium_wines
+    type: io.kestra.plugin.jdbc.duckdb.Queries
+
+    description: >
+      Extract premium wines where z-score is greater than 2.
+
+    url: "jdbc:duckdb:/tmp/bottleneck.db"
+
+    sql: "{{ read('file:///app/sql/07_extract_premium_wines.sql') }}"
+
+    retry:
+      type: constant
+      maxAttempts: 3
+      interval: PT30S
+      warningOnRetry: true
+
+  # 11- Extract ordinary wines
+  - id: extract_ordinary_wines
+    type: io.kestra.plugin.jdbc.duckdb.Queries
+
+    description: >
+      Extract ordinary wines where z-score is less than or equal to 2.
+
+    url: "jdbc:duckdb:/tmp/bottleneck.db"
+
+    sql: "{{ read('file:///app/sql/08_extract_ordinary_wines.sql') }}"
+
+    retry:
+      type: constant
+      maxAttempts: 3
+      interval: PT30S
+      warningOnRetry: true
+
+  # 12- Export revenue report to Excel
+  - id: export_revenue_xlsx
+    type: io.kestra.plugin.scripts.python.Commands
+
+    description: >
+      Export the revenue-per-product report to Excel format with a summary sheet.
+
+    containerImage: bottleneck-python:latest
+
+    pythonVersion: "3.11"
+
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      volumes:
+        - /Users/elkihale.n-abualqumboz.mk/Desktop/bottleneck_kestra_project/data:/app/data
+        - /Users/elkihale.n-abualqumboz.mk/Desktop/bottleneck_kestra_project/scripts:/app/scripts
+
+    commands:
+      - python /app/scripts/export_revenue_xlsx.py
+
+    retry:
+      type: constant
+      maxAttempts: 3
+      interval: PT30S
+      warningOnRetry: true
+
+errors:
+  - id: write_failure_report
+    type: io.kestra.plugin.scripts.shell.Commands
+
+    description: >
+      Write a local failure report if any task in the workflow fails.
+
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+
+    commands:
+      - |
+        set -e
+
+        mkdir -p /app/data/outputs/error_logs
+
+        REPORT_FILE="/app/data/outputs/error_logs/failure_report_{{ execution.id }}.txt"
+
+        echo "BottleNeck Kestra Workflow Failure Report" > "$REPORT_FILE"
+        echo "========================================" >> "$REPORT_FILE"
+        echo "Flow ID: {{ flow.id }}" >> "$REPORT_FILE"
+        echo "Namespace: {{ flow.namespace }}" >> "$REPORT_FILE"
+        echo "Execution ID: {{ execution.id }}" >> "$REPORT_FILE"
+        echo "Execution start date: {{ execution.startDate }}" >> "$REPORT_FILE"
+        echo "" >> "$REPORT_FILE"
+        echo "A task failed during the workflow execution." >> "$REPORT_FILE"
+        echo "Please check the Kestra UI logs to identify the failed task." >> "$REPORT_FILE"
+
+        echo "Failure report created:"
+        cat "$REPORT_FILE"

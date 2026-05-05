@@ -1,0 +1,9 @@
+BottleNeck Kestra Workflow Failure Report
+========================================
+Flow ID: p10_kestra_dataflow_orchestration_pipeline
+Namespace: com.bottleneck
+Execution ID: g4PZBqASPYqJcCBI74AAg
+Execution start date: 2026-05-05T13:00:52.782443Z
+
+A task failed during the workflow execution.
+Please check the Kestra UI logs to identify the failed task.
