@@ -37,21 +37,21 @@ The workflow must generate the following outputs:
 
 6. Error handling in case a task fails during execution.
 
-7. Retry logic for technical processing tasks that may fail temporarily.
+7. Retry logic for selected technical processing tasks that may fail temporarily.
 
 ---
 
 ## 3. Technologies Used
 
-| Tool       | Role                                                                        |
-| ---------- | --------------------------------------------------------------------------- |
-| Kestra     | Workflow orchestration, scheduling, monitoring, retries, and error handling |
-| DuckDB     | SQL transformations, joins, revenue calculation, tests, and CSV exports     |
-| Python     | Excel conversion, z-score calculation, and Excel report generation          |
-| Pandas     | Data manipulation inside Python scripts                                     |
-| OpenPyXL   | Excel file generation                                                       |
-| Docker     | Reproducible local execution environment                                    |
-| PostgreSQL | Kestra metadata database                                                    |
+| Tool | Role |
+|---|---|
+| Kestra | Workflow orchestration, scheduling, monitoring, retries, and error handling |
+| DuckDB | SQL transformations, joins, revenue calculation, tests, and CSV exports |
+| Python | Excel conversion, z-score calculation, and Excel report generation |
+| Pandas | Data manipulation inside Python scripts |
+| OpenPyXL | Excel file generation |
+| Docker | Reproducible local execution environment |
+| PostgreSQL | Kestra metadata database |
 
 ---
 
@@ -172,39 +172,52 @@ The Kestra workflow follows these main steps:
 
 The workflow also includes retries on selected technical processing tasks.
 
+Validation tasks are intentionally not retried because a failed validation usually means that the data does not respect the expected business rules.
+
 ---
 
 ## 7. Workflow Diagram
 
-The following diagram summarizes the main orchestration logic implemented in Kestra:
+The following diagram summarizes the main orchestration logic implemented in Kestra.
+
+In the Draw.io architecture diagram, some transformation and validation tasks are grouped together by functional stage to keep the architecture readable. In the actual Kestra workflow, they are implemented as separate tasks where appropriate.
 
 ```mermaid
-flowchart TD
-    A[Raw Excel files<br/>erp.xlsx / web.xlsx / liaison.xlsx] --> B[load_raw_files<br/>Shell task]
-    B --> C[convert_excel_to_csv<br/>Python<br/>Retry enabled]
+flowchart LR
+    R[Monthly Schedule<br/>15th day at 09:00] --> A[Raw Excel files<br/>erp.xlsx<br/>web.xlsx<br/>liaison.xlsx]
+
+    A --> B[load_raw_files<br/>Shell task]
+    B --> C[convert_excel_to_csv<br/>Python task<br/>Retry enabled]
+
     C --> D[clean_dedup_sources<br/>DuckDB SQL<br/>Retry enabled]
-    D --> E[test_cleaned_sources<br/>Validation gate]
+    D --> E[test_cleaned_sources<br/>Validation gate<br/>Row counts<br/>Missing keys<br/>Duplicate keys]
+
     E --> F[merge_sources<br/>DuckDB SQL<br/>Retry enabled]
-    F --> G[test_merge<br/>Validation gate]
+    F --> G[test_merge<br/>Validation gate<br/>Assert merged rows = 714]
+
     G --> H[compute_revenue<br/>DuckDB SQL<br/>Retry enabled]
-    H --> I[test_revenue<br/>Validation gate]
-    I --> J[zscore_flagging<br/>Python validation]
+    H --> I[test_revenue<br/>Validation gate<br/>Revenue not null<br/>Total = 70,568.60 euro]
+
+    I --> J[zscore_flagging<br/>Python task<br/>Classify premium vs ordinary<br/>Assert premium count = 30]
+
     J --> K[extract_premium_wines<br/>DuckDB SQL<br/>Retry enabled]
     J --> L[extract_ordinary_wines<br/>DuckDB SQL<br/>Retry enabled]
-    I --> M[export_revenue_xlsx<br/>Python<br/>Retry enabled]
+
+    I --> M[export_revenue_xlsx<br/>Python task<br/>Retry enabled]
 
     K --> N[premium_wines.csv]
     L --> O[ordinary_wines.csv]
     M --> P[revenue_per_product.xlsx]
 
-    N --> Q[data/outputs]
-    O --> Q
-    P --> Q
+    subgraph OUT[Final business outputs<br/>data/outputs/]
+        N
+        O
+        P
+    end
 
-    R[Monthly Schedule<br/>15th at 09:00] --> A
-
-    X[If task fails after retry<br/>or validation fails] --> Y[Global errors block]
-    Y --> Z[Failure report<br/>data/outputs/error_logs]
+    T[Technical task failure<br/>after retry] --> Y[Global errors block]
+    V[Validation failure] --> Y
+    Y --> Z[Failure report<br/>data/outputs/error_logs/]
 ```
 
 ---
@@ -213,11 +226,11 @@ flowchart TD
 
 The workflow starts from three Excel files:
 
-| File           | Description                                                                |
-| -------------- | -------------------------------------------------------------------------- |
-| `erp.xlsx`     | Internal ERP product data: product ID, price, stock quantity, stock status |
-| `web.xlsx`     | CMS/Web product data: SKU, product title, total sales, URL                 |
-| `liaison.xlsx` | Mapping file between ERP `product_id` and CMS/Web `sku`                    |
+| File | Description |
+|---|---|
+| `erp.xlsx` | Internal ERP product data: product ID, price, stock quantity, stock status |
+| `web.xlsx` | CMS/Web product data: SKU, product title, total sales, URL |
+| `liaison.xlsx` | Mapping file between ERP `product_id` and CMS/Web `sku` |
 
 The liaison file is required because the ERP and CMS systems use different product identifiers.
 
@@ -399,7 +412,14 @@ premium_wines.csv
 ordinary_wines.csv
 ```
 
+The final outputs are generated by two different technologies:
+
+* DuckDB exports the two CSV files for wine classification.
+* Python exports the Excel revenue report because the report contains multiple sheets.
+
 ### `revenue_per_product.xlsx`
+
+Created by the Python task `export_revenue_xlsx`.
 
 Contains:
 
@@ -408,6 +428,8 @@ Contains:
 
 ### `premium_wines.csv`
 
+Created by the DuckDB extraction task `extract_premium_wines`.
+
 Contains all wines where:
 
 ```text
@@ -415,6 +437,8 @@ z_score > 2
 ```
 
 ### `ordinary_wines.csv`
+
+Created by the DuckDB extraction task `extract_ordinary_wines`.
 
 Contains all wines where:
 
@@ -430,22 +454,22 @@ The workflow includes validation tests at key stages.
 
 The tests are implemented as SQL or Python validation tasks and act as **quality gates**. If one test fails, the workflow stops and the global error handler is triggered.
 
-| Stage           | Test                          | Expected Result |
-| --------------- | ----------------------------- | --------------- |
-| Cleaned ERP     | Row count                     | 825 rows        |
-| Cleaned Web     | Row count                     | 714 rows        |
-| Cleaned Liaison | Row count                     | 825 rows        |
-| Cleaned ERP     | Missing `product_id` values   | 0               |
-| Cleaned Web     | Missing `sku` values          | 0               |
-| Cleaned Liaison | Missing `product_id` values   | 0               |
-| Cleaned ERP     | Duplicate `product_id` values | 0               |
-| Cleaned Web     | Duplicate `sku` values        | 0               |
-| Cleaned Liaison | Duplicate `product_id` values | 0               |
-| Merge           | Merged dataset row count      | 714 rows        |
-| Revenue         | Revenue report row count      | 714 rows        |
-| Revenue         | Missing revenue values        | 0               |
-| Revenue         | Total revenue                 | 70,568.60 €     |
-| Z-score         | Premium wine count            | 30 wines        |
+| Stage | Test | Expected Result |
+|---|---|---|
+| Cleaned ERP | Row count | 825 rows |
+| Cleaned Web | Row count | 714 rows |
+| Cleaned Liaison | Row count | 825 rows |
+| Cleaned ERP | Missing `product_id` values | 0 |
+| Cleaned Web | Missing `sku` values | 0 |
+| Cleaned Liaison | Missing `product_id` values | 0 |
+| Cleaned ERP | Duplicate `product_id` values | 0 |
+| Cleaned Web | Duplicate `sku` values | 0 |
+| Cleaned Liaison | Duplicate `product_id` values | 0 |
+| Merge | Merged dataset row count | 714 rows |
+| Revenue | Revenue report row count | 714 rows |
+| Revenue | Missing revenue values | 0 |
+| Revenue | Total revenue | 70,568.60 € |
+| Z-score | Premium wine count | 30 wines |
 
 ### Source quality validation
 
@@ -517,7 +541,7 @@ Cron explanation:
 The workflow includes two levels of failure handling:
 
 ```text
-1. Task-level retries for technical processing tasks
+1. Task-level retries for selected technical processing tasks
 2. A global errors block that writes a failure report if the workflow fails
 ```
 
@@ -846,4 +870,3 @@ The final solution:
 * handles workflow failures with a failure report.
 
 The workflow is reproducible, testable, monitored through Kestra, and ready to be demonstrated during the project defense.
-# May-2026-project10-Mettez-en-place-un-pipeline-d-orchestration-des-flux
