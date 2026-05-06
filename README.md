@@ -793,19 +793,6 @@ The submitted project includes:
 7. Completed auto-evaluation form
 8. README documentation
 ```
-
-The main deliverables expected by the mission are:
-
-```text
-- Diagram of the task workflow in .drawio format
-- Kestra workflow in .yaml format
-- SQL and Python scripts
-- Excel revenue report
-- Premium wines CSV extraction
-- Ordinary wines CSV extraction
-- Presentation support
-```
-
 ---
 
 ## 21. Demonstration Plan
